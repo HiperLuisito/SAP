@@ -1,0 +1,27 @@
+---------------------------------------Validaciòn para nro de cuenta---------------------------
+if (:object_type='2') and (:transaction_type in ('U')) then
+
+	declare nroctanew nvarchar (100);
+	declare nroctaOld nvarchar (100);
+   	declare usuario   smallint;
+	
+	begin
+	
+		SELECT A."DflAccount" , T0."DflAccount" 
+		INTO nroctanew, nroctaOld
+		FROM OCRD T0
+		LEFT JOIN ACRD A ON T0."CardCode" = A."CardCode"
+		AND A."LogInstanc" = (SELECT MAX("LogInstanc") FROM ACRD WHERE "CardCode" = :list_of_cols_val_tab_del)
+		WHERE T0."CardCode" = :list_of_cols_val_tab_del;
+		
+		select "UserSign2" into usuario FROM OCRD where "CardCode" = :list_of_cols_val_tab_del;
+		
+			if :nroctanew <> :nroctaOld and :usuario not in ('37', '33')  then
+				error := 104;
+				error_message := 'No cuenta con permiso para modificar el nro de cuenta bancaria';
+				
+			end if;
+		
+		
+	end;
+end if;
