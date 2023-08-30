@@ -1,2 +1,0 @@
-# SAP
-Transaccion SAP

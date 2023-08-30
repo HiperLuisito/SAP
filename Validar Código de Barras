@@ -1,0 +1,31 @@
+# SAP
+#Transaccion SAP
+---------------------------------------Validacion para còdigo de barras------------------------------
+if (:object_type= '4') and (:transaction_type in ('U')) then
+
+	declare codeOld nvarchar(100);
+	declare codeNew nvarchar (100);
+	declare usuario smallint;
+	
+	begin
+	
+		SELECT A."CodeBars", T0."CodeBars"
+		INTO codeOld, codeNew
+		FROM OITM T0
+		LEFT JOIN AITM A ON T0."ItemCode" = A."ItemCode"
+		AND A."LogInstanc" = (SELECT MAX("LogInstanc") FROM AITM WHERE "ItemCode" = :list_of_cols_val_tab_del)
+		WHERE T0."ItemCode" = :list_of_cols_val_tab_del;
+		
+		select "UserSign2" into usuario FROM OITM where "ItemCode" = :list_of_cols_val_tab_del;
+		
+		if :usuario not in ('15', '25', '16', '17','26' ) then
+		
+			if :codeNew <> :codeOld  then
+				error := 104;
+				error_message := 'No cuenta con permiso para modificar el código de barras';
+			end if;
+			
+		end if;
+		
+	end;
+end if;
