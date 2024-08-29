@@ -1,4 +1,4 @@
-ALTER PROCEDURE SBO_SP_TransactionNotification
+CREATE PROCEDURE SBO_SP_TransactionNotification
 
 (
 	in object_type nvarchar(30), 				-- SBO Object Type
@@ -35,7 +35,7 @@ vu_porc numeric(5);
 ---
 varea nvarchar(20);
 vTaxIVABase nvarchar(20);
-vItemName nvarchar(100);
+vItemName nvarchar(200);
 vFrgnName nvarchar(100);
 vCardCode nvarchar(100);
 vCardCode1 nvarchar(100);
@@ -63,12 +63,13 @@ vgrp_art nvarchar(30);
 vU_TIMBRADO nvarchar(30);
 vU_VTIMBRADO date;
 vDocTotal numeric(15,3);
+vVatSum numeric(15,3);
 vCANCELED nvarchar(2);
 vBPLId numeric(3);
 vTaxDate date;
 vSeries numeric(5); 
 vGroupNum numeric(5); 
-vComments nvarchar(100); 
+vComments nvarchar(250); 
 vU_ORIGEN_HS nvarchar(20);
 vDocSubType nvarchar(5);
 vNumAtCard nvarchar(30);
@@ -202,8 +203,19 @@ vdoctotal2 numeric(15,3);
 vPaidToDate2 numeric(15,3);
 vwtsum2 numeric(15,3);
 VU_FC_ASOC numeric(15);
+VU_FV_ASOC numeric(15);
 vcardfname nvarchar(100);
+--vonhand numeric(9,3);
+vdeposito nvarchar(10);
 --VQRYGROUP1 nvarchar(1);
+vCountNum numeric(15);
+
+vDigit nvarchar(10);
+vChar nvarchar(10);
+vUsuario nvarchar(60);
+vWhsCd nvarchar(10);
+
+vMaxId numeric(15);
 
 error  int;				-- Result (0 for no error)
 error_message nvarchar (200); 		-- Error string to be displayed
@@ -986,17 +998,54 @@ if (:object_type='4')  then --articulos
 	
 		select 
 		ifnull("TaxCodeAP",''), ifnull("U_IVA_BASE",''), ifnull("ItemName",''), ifnull("FrgnName",''), ifnull("CardCode",''), "IndirctTax", "TaxCodeAR", "ItmsGrpCod", ifnull("U_SUBFAMILIA_ITM",''), "U_IMPORTADO", "QryGroup1",
-		ifnull("PUoMEntry",0), ifnull("SUoMEntry",0), ifnull("IUoMEntry",0), ifnull("INUoMEntry",0) 
+		ifnull("PUoMEntry",0), ifnull("SUoMEntry",0), ifnull("IUoMEntry",0), ifnull("INUoMEntry",0), ifnull("CodeBars", '') , ifnull("ItemCode", ''),  "WTLiable"
 		into vTaxCodeAP, vTaxIVABase, vItemName, vFrgnName, vCardCode, vIndirctTax, vTaxCodeAR,  vItmsGrpCod, vU_SUBFAMILIA_ITM, vU_IMPORTADO, vQryGroup1,
-		vPUoMEntry, vSUoMEntry, vIUoMEntry, vINUoMEntry 
+		vPUoMEntry, vSUoMEntry, vIUoMEntry, vINUoMEntry, vCodeBars, vItemCode, vwtliable
 		from OITM 
 		where "ItemCode" = :list_of_cols_val_tab_del;
+		
+		if vwtliable=  'N' then
+		  error := 103;
+		  error_message := 'Sujeto a retencion de impuesto debe estar tildado:' || vDigit;
+		end if;
+		
+		/*Cargar tabla para actualizar trastienda -- item_precio_prv e item*/
+          SELECT COALESCE(MAX(ID), 0)
+            INTO vMaxId
+            FROM ACT_PROV_PROD;
+            
+          if vMaxId = 0 then
+           vMaxId = 1;
+          end if;
+   
+          insert into ACT_PROV_PROD ("ID", "CARDCODE", "ITEMCODE", "STATUS")
+                             values ((vMaxId + 1), vCardCode, vItemCode, 'P');
+        /*Cargar tabla para actualizar trastienda -- item_precio_prv e item*/
+		
+		if vCodeBars <> '' then
+		 vDigit := f_get_chk_digit(vCodeBars);
+		 vChar := substr(vCodeBars, 13, 1);
+		 
+		 if vDigit <> vChar then
+		  error := 103;
+		  error_message := 'Digito verificador no valido. El DV correcto es:' || vDigit;
+		 end if;
+		end if;
 		
 		select "Rate" into vRate from OSTC 
 		where "Code"=vTaxCodeAP;
 		if to_number(vrate)<>to_number(vTaxIVABase) then
-			error := 103;
-			error_message := 'IVA compra es distinto al IVA Base del articulo';
+			if to_number(vrate)=10 or to_number(vrate)=5 then
+				error := 103;
+				error_message := 'IVA compra es distinto al IVA Base del articulo';
+			else
+				select "Rate" into vRate from OSTC 
+				where "Code"=vTaxCodeAR;
+				if to_number(vrate)<>to_number(vTaxIVABase) then
+					error := 103;
+					error_message := 'IVA venta es distinto al IVA Base del articulo';
+				end if;
+			end if;
 		end if;
 		
 		if vItemName='' then
@@ -1025,7 +1074,7 @@ if (:object_type='4')  then --articulos
 
 		if vTaxIVABase='' then
 		    error := 108;
-			error_message := 'Debe IVA Base';
+			error_message := 'Debe registrar IVA Base';
 		end if;
 		
 		if vU_IMPORTADO='SI' and  vQryGroup1='N' then
@@ -1079,6 +1128,17 @@ if (:object_type='4')  then --articulos
 		    error := 104;
 			error_message := 'La sub-familia no corresponde al grupo articulo';
 		end if;
+	
+		SELECT ifnull("UserSign2","UserSign") INTO vUsuario FROM OITM  WHERE "ItemCode" = :list_of_cols_val_tab_del;
+	
+		SELECT count(*) INTO vcnt FROM OITW 
+		WHERE "ItemCode" = :list_of_cols_val_tab_del
+		and "Locked"='Y';
+		
+		if vcnt>0 and vUsuario not in ('15', '25', '16', '17', '55')  then
+			error := 104;                                                      	
+			error_message := 'No puede bloquear el articulo para un deposito-' || vUsuario;		
+		end if;
 		
 	end if;
 
@@ -1088,11 +1148,11 @@ if (:object_type='13')  then --factura deudor
 	select  ifnull("NumAtCard",'&'), ifnull("U_DOC",'&'), ifnull("U_TIMBRADO",'&'),
 	ifnull("U_VTIMBRADO",'2000-01-01'), "DocTotal", "CANCELED", "BPLId", 
 	ifnull("LicTradNum",'&'),  "TaxDate", "Series", "CardCode", "GroupNum", 
-	ifnull("Comments",'&'), ifnull("U_ORIGEN_HS",'&'), "SlpCode" , "DocSubType"
+	ifnull("Comments",'&'), ifnull("U_ORIGEN_HS",'&'), "SlpCode" , "DocSubType", "VatSum"
 	into vNumAtCard, vU_DOC, vU_TIMBRADO,
 	vU_VTIMBRADO, vDocTotal, vCANCELED, vBPLId, 
 	vLicTradNum, vTaxDate, vSeries, vCardCode, vGroupNum, 
-	vComments, vU_ORIGEN_HS, vSlpCode, vDocSubType
+	vComments, vU_ORIGEN_HS, vSlpCode, vDocSubType, vVatSum
 	from OINV 
 	where "DocEntry" = :list_of_cols_val_tab_del;
 
@@ -1106,6 +1166,32 @@ if (:object_type='13')  then --factura deudor
 				error := 102;
 				error_message := 'Docmento existente ' || vNumAtCard || ' timbrado ' || vU_timbrado ;
 		    end if;
+		    
+    --Facturas cobradas por sucursal
+    /*IF vseries IN (118, 161, 172) THEN 
+         vTotLine NUMERIC(15, 2);
+         vTotLine = 0;
+         
+	     BEGIN
+		   DECLARE CURSOR DET FOR
+		   SELECT SUM("LineTotal") 
+		 	 FROM "INV1" 
+		 	WHERE "DocEntry" = :list_of_cols_val_tab_del;
+		 	
+		 		OPEN DET;
+		 		FETCH DET into vTotLine;
+		 		WHILE NOT DET::NOTFOUND 
+		 		DO
+		 			IF ABS((vDocTotal - vVatSum) - vTotLine) > 100 THEN
+                     error := 104;
+		 			 error_message := 'La diferencia entre el total de la cabecera y el total de lineas exede a la diferencia permitida' ;
+                    END IF;
+                    
+		 			FETCH DET INTO vTotLine;
+		 		END WHILE;
+		 END;
+    END IF;*/
+    --Facturas cobradas por sucursal
 
 if vseries<>163 then --no es pdv
 	
@@ -1511,7 +1597,17 @@ if (:object_type='22')  then --orden de compra prv
 		error := 102;
 		error_message := '% descuento total debe ser mayor o igual a cero';
 	end if;
-
+--edi-------------------------
+	if :vCANCELED = 'N' and vdocstatus<>'C' then
+		select count(*) into vcnt 
+		from "INTEGRATION"."A01_EDI"
+		where "DOCENTRY"=:list_of_cols_val_tab_del and "TIPO"='PED' and "ESTADO"='T';
+		if vcnt>0 then
+			error := 102;
+			error_message := 'Pedido enviado por EDI - Imposible modificar';
+		end if;		
+	end if;
+------------------------------	
 	select count(*)
 	into vcnt
 	from "@LOC_TIPO_COMPRA_CAB" where "U_SERIE_PED"=vseries;
@@ -1593,7 +1689,8 @@ if (:object_type='22')  then --orden de compra prv
 			error_message := 'El proveedor es romaneo NO';
 		end if;
 */
-		BEGIN
+
+        BEGIN
 			DECLARE CURSOR DETALLE FOR
 			select "ItemCode", ifnull("CodeBars",'') as barras, count(*)  as cant
 			from POR1 
@@ -1610,6 +1707,56 @@ if (:object_type='22')  then --orden de compra prv
 			FETCH DETALLE into varti, vcodebars, vcnt;
 			end while;
 		END;
+		
+		/*Restriccion para produccion*/
+		if vslpcode in (1) then
+			BEGIN
+				DECLARE CURSOR DETALLE FOR
+				select "ItemCode", ifnull("CodeBars",'') as barras, SUBSTR("WhsCode", 1, 1) as WhsCode
+				from POR1 
+				where "ItemCode" in (SELECT distinct "Code"
+						   	           FROM ITT1
+							          WHERE "OcrCode3" in ('PANAD', 'CONF'))
+				  and "DocEntry" = :list_of_cols_val_tab_del;
+				OPEN DETALLE;
+				FETCH DETALLE into varti, vcodebars, vWhsCd;
+				
+				while not DETALLE::NOTFOUND 
+				DO
+					if :vseries in (84, 90, 94) and vWhsCd <> 'P' then
+						error := 102;
+						error_message := 'El item (' || varti || ' - codigo de barras ' || vcodebars ||  ') no esta direccionado al deposito de produccion';
+						--error_message := 'El pedido es del tipo MPILOC, debe utilizar el almacen de produccion correspondiente a la sucursal en todos los items';
+					end if;
+				FETCH DETALLE into varti, vcodebars, vWhsCd;
+				end while;
+			END;
+	    end if;
+	    --Activar para salida de produccion San Lorenzo
+	    if vslpcode in (6, 14) then
+	        BEGIN
+				DECLARE CURSOR DETALLE FOR
+				select "ItemCode", ifnull("CodeBars",'') as barras, SUBSTR("WhsCode", 1, 1) as WhsCode
+				from POR1 
+				where "ItemCode" in (SELECT distinct "Code"
+						   	           FROM ITT1
+							          WHERE "OcrCode3" IN ('PANAD', 'CONF', 'ROTIC'))
+				  and "DocEntry" = :list_of_cols_val_tab_del;
+				OPEN DETALLE;
+				FETCH DETALLE into varti, vcodebars, vWhsCd;
+				
+				while not DETALLE::NOTFOUND 
+				DO
+					if :vseries in (84, 90, 94) and vWhsCd <> 'P' then
+						error := 102;
+						error_message := 'El item (' || varti || ' - codigo de barras ' || vcodebars ||  ') no esta direccionado al deposito de produccion';
+						--error_message := 'El pedido es del tipo MPILOC, debe utilizar el almacen de produccion correspondiente a la sucursal en todos los items';
+					end if;
+				FETCH DETALLE into varti, vcodebars, vWhsCd;
+				end while;
+			END;
+		end if;
+		/*Restriccion para produccion*/
 
 		BEGIN
 			DECLARE CURSOR DETALLE FOR
@@ -1638,7 +1785,7 @@ if (:object_type='22')  then --orden de compra prv
 					error_message := 'El item (' || varti || ') tiene cantidad en negativo';
 				end if;
 
-				if :vcnt=0 and vu_ped_inv='SI'  then
+				if :vcnt=0 and vu_ped_inv='SI' and transaction_type<>'L'  then
 					error := 102;
 					error_message := 'El item (' || varti || ') no esta asignado al proveedor (' || vcardcode || ')';
 				end if;
@@ -1686,15 +1833,15 @@ if (:object_type='22')  then --orden de compra prv
 				
 				if :transaction_type='A' and :vu_ped_inv='SI' then 
 				--solo insert y los que no entran en proceso autorizacion para compra local
-					SELECT ifnull(sum(t0."OnHand"),0)
+					/*SELECT ifnull(sum(t0."OnHand"),0)
 					into vonhand
 					FROM OITW t0 
 					inner join OWHS t1 on t0."WhsCode"=t1."WhsCode"
 					--where t1."BPLid"=vbplid
 					where t0."WhsCode"=vwhscode
-					and "ItemCode"=varti;
+					and "ItemCode"=varti;*/
 	
-					select ifnull(round((sum(ta."CANTIDAD")/NULLIF(vu_dias_stk, 0)),2),0)
+					/*select ifnull(round((sum(ta."CANTIDAD")/NULLIF(vu_dias_stk, 0)),2),0)
 					into vgiro
 					from 
 					(select t0."BPLId" as "SUC", t1."ItemCode" as "ITEMCODE", 
@@ -1704,7 +1851,7 @@ if (:object_type='22')  then --orden de compra prv
 					where t0."CANCELED"='N'
 					and ADD_DAYS( t0."TaxDate",vu_dias_stk ) >= 
 					to_date(SUBSTRING (vtaxdatet,1,4) || '-' || SUBSTRING (vtaxdatet,6,2) || '-' || SUBSTRING (vtaxdatet,9,2),'YYYY-MM-DD')
-					group by t0."BPLId", t1."ItemCode", t0."TaxDate") ta;
+					group by t0."BPLId", t1."ItemCode", t0."TaxDate") ta;*/
 /*
 					union all
 					select "SUC","ITEMCODE",to_date("FECHA") as "FECHA","CANTIDAD"
@@ -1715,12 +1862,12 @@ if (:object_type='22')  then --orden de compra prv
 					ta."ITEMCODE"=varti
 					and ta."SUC"=vbranch;
 */						
-					vstk30d:=0;
+					/*vstk30d:=0;
 					if vonhand<round((vgiro * vu_dias_stk ),0) then
 						vstk30d:=round((vgiro * vu_dias_stk ),0)-vonhand;
-					end if;
+					end if;*/
 	
-					select max(ta.FECHA) as fecha
+					/*select max(ta.FECHA) as fecha
 					into vultcmp
 					from
 					(select t0."BPLId" as "SUC", t1."ItemCode" as "ITEMCODE", 
@@ -1728,14 +1875,14 @@ if (:object_type='22')  then --orden de compra prv
 					from OPCH t0 
 					inner join PCH1 t1 on t0."DocEntry"=t1."DocEntry" 
 					where t0."CANCELED"='N'
-					group by t0."BPLId", t1."ItemCode", t0."TaxDate") ta;
+					group by t0."BPLId", t1."ItemCode", t0."TaxDate") ta;*/
 /*
 					union all
 					select "SUC","ITEMCODE",to_date("FECHA") as "FECHA","CANTIDAD"
 					from "INTEGRATION"."A01_HISTO_CMP") ta
 					where ta."ITEMCODE"=varti and ta."SUC"=vbranch;					
 */	
-					select max(ta.FECHA) as fecha
+					/*select max(ta.FECHA) as fecha
 					into vultvta
 					from
 					(select t0."BPLId" as "SUC", t1."ItemCode" as "ITEMCODE", 
@@ -1743,17 +1890,17 @@ if (:object_type='22')  then --orden de compra prv
 					from OINV t0 
 					inner join INV1 t1 on t0."DocEntry"=t1."DocEntry" 
 					where t0."CANCELED"='N'
-					group by t0."BPLId", t1."ItemCode", t0."TaxDate") ta;
+					group by t0."BPLId", t1."ItemCode", t0."TaxDate") ta;*/
 /*					
 					union all
 					select "SUC","ITEMCODE",to_date("FECHA") as "FECHA","CANTIDAD"
 					from "INTEGRATION"."A01_HISTO_VTA") ta
 					where ta."ITEMCODE"=varti and ta."SUC"=vbranch;					
 */
-					update POR1 
+					/*update POR1 
 					set "U_EXISTENCIA"=vonhand, "U_STK30D"=vstk30d, 
 					"U_UCMP"=vultcmp, "U_UVTA"=vultvta, "U_GIRO"=vgiro
-					where "DocEntry"=:list_of_cols_val_tab_del and "LineNum"=:vlinenum;
+					where "DocEntry"=:list_of_cols_val_tab_del and "LineNum"=:vlinenum;*/
 				end if;
 				FETCH DETALLE into vlinenum, vsuc, varea, vsector,
 				vprice, vwhscode, varti, vQuantity;
@@ -1831,6 +1978,23 @@ if (:object_type='18') then --factura proveedores
 		error := 102;
 		error_message := 'Defina Tipo Documento';
 	end if;
+	
+	/*Validacion de numero de comprobante de entidades publicas*/
+	if vu_doc=4 and :transaction_type in ('A') then
+		--vCountNum:=0;
+	    select count(*)
+	      into vCountNum
+	      from OPCH
+	     where "CANCELED"='N'
+           and "NumAtCard" = vnumatcard 
+           and "CardCode"=vcardcode;
+	     if vCountNum > 1 then
+		  error := 102;
+		  error_message := 'El numero de documento que intenta insertar ya se encuentra registrado ' || vnumatcard;
+		 end if;
+	end if;
+	/*Validacion de numero de comprobante de entidades publicas*/
+	
 	if :vcanceled<>'N' and :transaction_type='U' and vusersign2 <>1 then
 		error := 102;
 		error_message := 'No se úede modificar un documento cancelado - Ver con manager';
@@ -1979,6 +2143,18 @@ if (:object_type='18') then --factura proveedores
 			   error_message := 'Salto de linea en comentario no permitido!!!';
 	         end if;
             --verificar que no exista salto de linea en los comentarios
+
+            --verificar que no exista comillas en los comentarios
+            select LOCATE("Comments", '"', 0)
+              into vchar13
+              from OPCH 
+	         where "DocEntry" = :list_of_cols_val_tab_del;
+	         
+	         if :vchar13 <> 0 then	         
+	           error := 25;
+			   error_message := 'No se permiten comillas en los comentarios!!!';
+	         end if;
+            --verificar que no exista comillas en los comentarios
 							
 --			if :vu_importacion<>'&' then
 --				select count(*) into vcnt from "@A01_IMPORT" where "Code"=vimport;
@@ -2133,10 +2309,10 @@ if (:object_type='18') then --factura proveedores
 			error := 102;
 			error_message := 'No se puede utilizar factura de reserva para compra de servicios por caja chica';
 		end if;
-		if :vgroupnum<>-1 and vdoctotal>2000000 then  --2023-04-09
+		if :vgroupnum<>-1 and vdoctotal>3000000 then  --2023-04-09
 			error := 102;
 			--error_message := 'La condicion de pagos debe ser CONTADO para gastos de caja chica - Pestaña finanzas';
-			error_message := 'Monto tope para factura credito caja chica es de 2.000.000';
+			error_message := 'Monto tope para factura credito caja chica es de 3.000.000';
 		end if;
 		select count(*) into vcnt from VPM2 where "DocEntry"=:list_of_cols_val_tab_del;
 		if :vcnt=0 then
@@ -2179,9 +2355,27 @@ end if;
 		error := 102;
 		error_message := 'Defina tipificacion de compras';
 	else
-		select "Code", "Name", "U_SUC_UNIC", "U_AREA_UNIC", "U_SECTOR_UNIC", "U_NCI"
+	  if vseries = 93 then
+		select count(*) into vcnt
+		from "@LOC_TIPO_DCMP_CAB" where "U_SERIE_SNC"=vseries
+		and "U_SUC_UNIC" = 'NO';
+		
+		if vcnt=1 then
+			select "Code", "Name", "U_SUC_UNIC", "U_AREA_UNIC", "U_SECTOR_UNIC", "U_NCI"
+			into vcode, vname,  vu_suc_unic, vu_are_unic, vu_sec_unic, vu_nci
+			from "@LOC_TIPO_DCMP_CAB" where "U_SERIE_NC"=vseries;
+		else
+			select max("Code"), max("Name"), max("U_SUC_UNIC"), max("U_AREA_UNIC"), max("U_SECTOR_UNIC"), max("U_NCI")
+			into vcode, vname,  vu_suc_unic, vu_are_unic, vu_sec_unic, vu_nci
+			from "@LOC_TIPO_DCMP_CAB" where "U_SERIE_SNC"=vseries
+			and "U_SUC_UNIC" = 'NO';
+		end if;
+	  else
+	    select "Code", "Name", "U_SUC_UNIC", "U_AREA_UNIC", "U_SECTOR_UNIC", "U_NCI"
 		into vcode, vname,  vu_suc_unic, vu_are_unic, vu_sec_unic, vu_nci
 		from "@LOC_TIPO_DCMP_CAB" where "U_SERIE_SNC"=vseries;
+	  end if;
+		
 		select "GroupCode"
 		into vgroupcode
 		from OCRD where "CardCode"=vcardcode;
@@ -2304,20 +2498,27 @@ if (:object_type='19') then --nota credito proveedores
 	"TaxDate", "Series", "CardCode", 
 	--ifnull("U_IMPORTACION",'&'), 
 	"GroupNum",	ifnull("Comments",'&'), "WTSum", "PaidToDate", "DocType", 
-	"SlpCode", "UserSign2", ifnull("U_MOT_SNC",''), ifnull("U_FC_ASOC",0),
+	"SlpCode", "UserSign2", ifnull("U_MOT_SNC",''), ifnull("U_FC_ASOC",0), ifnull("U_FV_ASOC",0),
 	"DocTotal"
 	into vNumAtCard, vU_DOC, vU_TIMBRADO,
 	vdoctotal, vcanceled, vbplid, vlictradnum, vu_vtimbrado, 
 	vtaxdate, vseries, vcardcode, 
 	--vu_importacion, 
 	vgroupnum, vcomments, vwtsum, vpaidtodate, vdoctype, 
-	vslpcode, vusersign2, vu_mot_snc, vu_fc_asoc,
+	vslpcode, vusersign2, vu_mot_snc, vu_fc_asoc, vu_fv_asoc,
 	vdoctotal
 	from ORPC 
 	where "DocEntry" = :list_of_cols_val_tab_del;
 
+--apagado el 21/08 por que afecta a pagos --manager
+--restricción de factura de venta asociada (modificado por julian ortigoza el 19/08/2024)
+--	if vu_fv_asoc<>0 then
+--		error := 102;
+--		error_message := 'No se puede asignar Factura de Ventas en la Nota de Credito de Proveedores';
+--	end if;
+
 --tope asociacion nc-factura
-	if vu_fc_asoc<>0 then
+	if vu_fc_asoc<>0 and :vcanceled='N' then
 		select "DocTotal", "PaidToDate", "WTSum", "CardCode" 
 		into vdoctotal2, vPaidToDate2, vwtsum2, vcardcode1
 		from OPCH where "DocEntry"=vu_fc_asoc;
@@ -2329,7 +2530,26 @@ if (:object_type='19') then --nota credito proveedores
 			error := 102;
 			error_message := 'Los proveedores de nota de credito y factura asociada son distintos';
 		end if;
+	
+--TN para compras asociadas a NC que ya entan incluidas en OP	
+		if :transaction_type='A' then
+			select count(*) into vcnt
+			from "@LOC_ORDEN_PAGO_DET" d 
+			inner join "@LOC_ORDEN_PAGO_CAB" c on d."DocEntry"=c."DocEntry"
+			where d."U_DOCENTRY"=vu_fc_asoc and c."U_ESTADO" in ('P','A','L','V','AP')
+			and d."U_APROB" = 'SI';
+			if vcnt>0 then
+				select max(c."DocNum") into vdocnum
+				from "@LOC_ORDEN_PAGO_DET" d 
+				inner join "@LOC_ORDEN_PAGO_CAB" c on d."DocEntry"=c."DocEntry"
+				where d."U_DOCENTRY"=vu_fc_asoc and c."U_ESTADO" in ('P','A','L','V','AP');
+				error := 102;
+				error_message := 'Compra asociada incluida en OP ' || vdocnum || ' - Debe eliminar la compra asociada';
+			end if;
+		end if;
+				
 	end if;	
+	
 	if transaction_type='U' then
 	    SELECT COUNT(*) 
 	    INTO vCNT FROM VPM2 T0
@@ -2348,9 +2568,19 @@ if (:object_type='19') then --nota credito proveedores
 		error := 102;
 		error_message := 'Defina tipificacion de compras';
 	else
-		select "Code", "Name", "U_SUC_UNIC", "U_AREA_UNIC", "U_SECTOR_UNIC", "U_NCI"
-		into vcode, vname,  vu_suc_unic, vu_are_unic, vu_sec_unic, vu_nci
+		select count(*) into vcnt
 		from "@LOC_TIPO_DCMP_CAB" where "U_SERIE_NC"=vseries;
+		
+		if vcnt=1 then
+			select "Code", "Name", "U_SUC_UNIC", "U_AREA_UNIC", "U_SECTOR_UNIC", "U_NCI"
+			into vcode, vname,  vu_suc_unic, vu_are_unic, vu_sec_unic, vu_nci
+			from "@LOC_TIPO_DCMP_CAB" where "U_SERIE_NC"=vseries;
+		else
+			select max("Code") as code, max("Name"), max("U_SUC_UNIC"), max("U_AREA_UNIC"), max("U_SECTOR_UNIC"), max("U_NCI")
+			into vcode, vname,  vu_suc_unic, vu_are_unic, vu_sec_unic, vu_nci
+			from "@LOC_TIPO_DCMP_CAB" where "U_SERIE_NC"=vseries;
+		end if;
+		
 		
 		select "GroupCode"
 		into vgroupcode
@@ -2633,10 +2863,6 @@ if (:object_type='59')  and :transaction_type<>'D'  then --entrada stk
 			error_message := 'Codigo origen existente';
 		end if;
 	end if;
-if vseries<>162 then --no es compensa
-
-	select "U_LPRECV" into vu_lprecv
-	from "@LOC_SUCURSALES" WHERE "Code"=vbplid;
 	
 	if :vcomments='' then
 		error := 102;
@@ -2646,14 +2872,21 @@ if vseries<>162 then --no es compensa
 		error := 102;
 		error_message := 'El comentario no puede tener mas de 200 caracteres';
 	end if;
+	
 	select "U_AJUSTE_IN", "U_R_REMITO_IN"
 	into vU_AJUSTE_IN, vU_R_REMITO_IN
 	from "@LOC_SUCURSALES"
 	where "Code"=vbplid;
+	
 	if vU_AJUSTE_IN=vseries then
-		if vu_mot_ajuste='' then
+		select max(ifnull("BaseType",0))
+		into vBaseType
+		from IGN1 
+		where "DocEntry" = :list_of_cols_val_tab_del;	
+	
+		if vu_mot_ajuste='' and vbasetype<>202 then
 			error := 102;
-			error_message := 'Indique motivo de ajuste';
+			error_message := 'Indique motivo de ajuste E ' || vbasetype;
 		end if;
 	end if;
 
@@ -2671,6 +2904,9 @@ if vseries<>162 then --no es compensa
 --			error_message := 'Indique Traslado Stock Asociado a la remision';
 --		end if;
 	end if;
+	
+	select "U_LPRECV" into vu_lprecv
+	from "@LOC_SUCURSALES" WHERE "Code"=vbplid;
 	
 	BEGIN
 		DECLARE CURSOR DETALLE FOR
@@ -2699,7 +2935,8 @@ if vseries<>162 then --no es compensa
 				error := 102;
 				error_message := 'El item (' || vlinenum || ') no tiene sector asignado';
 			end if;
-			
+
+--////////////////////////////////////////////////////////			
 			select count(*) into vcnt
 			from "@LOC_TRANSF_PCT" where "Code"=varti;
 			if vcnt>0 then
@@ -2711,16 +2948,23 @@ if vseries<>162 then --no es compensa
 			
 			select "Price" into vprice2
 			from ITM1 where "ItemCode"=varti and "PriceList"=vu_lprecv;
-			if vseries<>162 and vprice2>0 and vprice2*(100+vu_porc)/100<vprice and ucase(vref2)<>'CORRECCION' and ucase(LEFT(vref2,2))<>'I-'	then
+			
+			select count(*) into vcnt from "@LOC_TRANSF_PRD" where "U_ITEMCODE"=varti;
+			
+			--212 grupo articulo oferta
+			select "ItmsGrpCod" into vItmsGrpCod
+			from OITM where "ItemCode"=varti;
+--			vseries 103 entrada remito
+--			vseries 162 compensa
+			if vItmsGrpCod<>212 and vcnt=0 and vseries<>162 and vseries<>103 and vprice2>0 and vprice2*(100+vu_porc)/100<vprice and ucase(vref2)<>'CORRECCION' and ucase(LEFT(vref2,2))<>'I-'	then
 				error := 102;
 				error_message := 'Item (' || varti || ') costo ' || vprice || ' - precio ' || vprice2 || ' (cantidad:' || vquantity || ')';
-				
 			end if;		
 			FETCH DETALLE into vlinenum, vsuc, varea, 
 			vsector, vprice, varti, vwhscode, vquantity;
 		end while;
 	END;
-end if;
+
 end if;
 --------------------------------------------------------------------------------------------------------------------------------
 if (:object_type='60')  and :transaction_type<>'D'  then --salida stk
@@ -2759,9 +3003,16 @@ from "@LOC_SUCURSALES" WHERE "Code"=vbplid;
 	from "@LOC_SUCURSALES"
 	where "Code"=vbplid;
 
-	if vU_AJUSTE_OUT=vseries and (vu_mot_ajuste='') then
-		error := 102;
-		error_message := 'Indique motivo de ajuste';
+	if vU_AJUSTE_OUT=vseries  then
+		select max(ifnull("BaseType",0))
+		into vBaseType
+		from IGE1 
+		where "DocEntry" = :list_of_cols_val_tab_del;	
+	
+		if vu_mot_ajuste='' and vbasetype<>202 then
+			error := 102;
+			error_message := 'Indique motivo de ajuste S ' || vbasetype;
+		end if;
 	end if;
 
 	if vU_R_REMITO_OUT=vseries then
@@ -2818,7 +3069,10 @@ from "@LOC_SUCURSALES" WHERE "Code"=vbplid;
 				vu_porc:=0;
 			end if;
 			
-			if vseries<>165 and vprice2>0 and vprice2*(100+vu_porc)/100<vprice and ucase(vref2)<>'CORRECCION' and ucase(LEFT(vref2,2))<>'I-'	then
+			select count(*) into vcnt from "@LOC_TRANSF_PRD" where "U_ITEMCODE"=varti;
+--			vseries 108 salida remito
+			
+			if vcnt=0 and vseries<>165 and vseries<>108 and vprice2>0 and vprice2*(100+vu_porc)/100<vprice and ucase(vref2)<>'CORRECCION' and ucase(LEFT(vref2,2))<>'I-'	then
 --			if vprice2>0 and vprice2<vprice and ucase(vref2)<>'CORRECCION'	then
 				error := 102;
 				error_message := 'Item (' || varti || ') costo ' || vprice || ' - precio ' || vprice2;
@@ -2913,13 +3167,13 @@ if (:object_type='1250000001')  and :transaction_type<>'D'  then --solicitud de 
 			DECLARE CURSOR DETALLE FOR
 			select "LineNum", ifnull("OcrCode",''), ifnull("OcrCode2",''),  
 			ifnull("OcrCode3",''), ifnull("Price",0), "WhsCode", "ItemCode", 
-			"BaseType"
+			"BaseType", "FromWhsCod", "Quantity"
 			from "WTQ1" 
 			where "DocEntry" = :list_of_cols_val_tab_del;
 			OPEN DETALLE;
 			FETCH DETALLE into vlinenum, vsuc, varea, 
 			vsector, vprice, vwhscode, varti, 
-			vbase;
+			vbase, vdeposito, vquantity;
 			while not DETALLE::NOTFOUND 
 			DO
 				select "PrcCode" 
@@ -2946,9 +3200,16 @@ if (:object_type='1250000001')  and :transaction_type<>'D'  then --solicitud de 
 					error := 102;
 					error_message := 'El item (' || varti || ') tiene sucursal asignada en linea distinta a la cabecera ' || vsuc || '-' || vsuc1;
 				end if;
+				
+				select "OnHand" into vonhand from OITW where "ItemCode"=varti and "WhsCode"=vdeposito;
+				if vonhand<vquantity then
+					error := 102;
+					error_message := 'El item (' || varti || ') no tiene existencia suficiente en ' || vdeposito;
+				end if;
+				
 				FETCH DETALLE into vlinenum, vsuc, varea, 
 				vsector, vprice, vwhscode, varti, 
-				vbase;
+				vbase, vdeposito, vquantity;
 			end while;
 		END;
 	end if;
@@ -3474,6 +3735,15 @@ if vseries<> 160 then
 				end if;
 			end if;
 		end if;
+--seguro para donaciones		
+		if vU_SERIE_RECIBO=vseries and vDocType='A' then
+			select count(*) into vcnt from ORCT where "Series"=vseries and "CounterRef"=vCounterRef and "Canceled"='N';
+			if vcnt>1 then
+				error := 102;
+				error_message := 'Donacion para ' || vCounterRef || ' ya se encuentra registrada';
+			end if;
+		end if;
+		
 	end if;
 
 end if;
@@ -3533,7 +3803,7 @@ if (:object_type='2') and (:transaction_type in ('U')) then
 		
 		select "UserSign2" into usuario FROM OCRD where "CardCode" = :list_of_cols_val_tab_del;
 		
-			if :plazoNew <> :plazoOld and :usuario not in ('37', '33')  then
+			if :plazoNew <> :plazoOld and :usuario not in ('37', '33', '42', '102', '39', '38', '40','15')  then
 				error := 104;
 				error_message := 'No cuenta con permiso para modificar los Plazos';
 				
@@ -3573,17 +3843,69 @@ if (:object_type='2') and (:transaction_type in ('U')) then
 end if;
 
 
----------------------------------------Validacion para còdigo de barras------------------------------
+---------------------------------------Validacion para còdigo de barras e itemname------------------------------
 if (:object_type= '4') and (:transaction_type in ('U')) then
 
 	declare codeOld nvarchar(100);
 	declare codeNew nvarchar (100);
+	declare itemNameOld nvarchar(100);
+	declare itemNameNew nvarchar(100);
+	declare usuario smallint;
+	declare balanza nvarchar(1);
+	
+	begin
+	
+	    codeOld = null; 
+	    codeNew = null; 
+	    itemNameOld = null; 
+	    itemNameNew = null; 
+	    balanza = null;
+	
+		SELECT A."CodeBars", T0."CodeBars", A."ItemName", T0."ItemName", T0."QryGroup2"
+		INTO codeOld, codeNew, itemNameOld, itemNameNew, balanza
+		FROM OITM T0
+		LEFT JOIN AITM A ON T0."ItemCode" = A."ItemCode"
+		AND A."LogInstanc" = (SELECT MAX("LogInstanc") FROM AITM WHERE "ItemCode" = :list_of_cols_val_tab_del)
+		WHERE T0."ItemCode" = :list_of_cols_val_tab_del;
+		
+		select "UserSign2" into usuario FROM OITM where "ItemCode" = :list_of_cols_val_tab_del;
+		
+		if :usuario not in ('15', '25', '16', '17','26','9', '161', '55', '12') then
+		  -- Validación para código de barras
+		  if balanza = 'N' and (codeNew is null or codenew = '') then
+		    error := 104;
+		    error_message := 'El campo código de barras no puede quedar vacío si ya contaba con uno';
+		  else 
+		    if codeNew <> '' then
+			 if :codeNew <> :codeOld  then
+				 error := 104;
+				 error_message := 'No cuenta con permiso para modificar el código de barras';
+			 end if;
+		    end if;
+		  end if;
+		  
+		  -- Validación para itemname
+		  if :itemNameNew <> :itemNameOld then
+		    error := 104;
+		    error_message := 'No cuenta con permiso para modificar el nombre del item';
+		  end if;
+		end if;
+	end;
+end if;
+---------------------------------------------------------------------------------
+
+if (:object_type= '4') and (:transaction_type in ('U')) then
+
+	declare validFromOld nvarchar(100);
+	declare validFromNew nvarchar (100);
+    declare validToOld nvarchar(100);
+	declare validToNew nvarchar (100);
 	declare usuario smallint;
 	
 	begin
 	
-		SELECT A."CodeBars", T0."CodeBars"
-		INTO codeOld, codeNew
+		SELECT A."validFrom", T0."validFrom", A."validTo", T0."validTo"
+		INTO validFromOld, validFromNew, validToOld, validToNew
 		FROM OITM T0
 		LEFT JOIN AITM A ON T0."ItemCode" = A."ItemCode"
 		AND A."LogInstanc" = (SELECT MAX("LogInstanc") FROM AITM WHERE "ItemCode" = :list_of_cols_val_tab_del)
@@ -3593,9 +3915,12 @@ if (:object_type= '4') and (:transaction_type in ('U')) then
 		
 		if :usuario not in ('15', '25', '16', '17','26' ) then
 		
-			if :codeNew <> :codeOld  then
+			if ifnull(:validFromNew, '0') <> ifnull(:validFromOld , '0') OR IFNULL( :validToNew , '0') <> IFNULL( :validToOld, '0' )then
+		--IF :validFromOld = NULL  THEN  
+	
+				--if :validFromNew is not null or  :validFromOld is not null then
 				error := 104;
-				error_message := 'No cuenta con permiso para modificar el código de barras';
+				error_message := 'No cuenta con permiso para modificar la fecha valido desde/hasta';
 			end if;
 			
 		end if;
@@ -3603,6 +3928,91 @@ if (:object_type= '4') and (:transaction_type in ('U')) then
 	end;
 end if;
 
+--------------------------------------------------------------------------------------------------
+IF (:object_type = '66') AND (:transaction_type in ('A', 'U')) THEN
+    SELECT IFNULL("OcrCode",''), IFNULL("OcrCode2",''), IFNULL("OcrCode3",'')
+	  INTO vsuc1, vu_area, vu_sector
+	  FROM OITT 
+	 WHERE "Code" = :list_of_cols_val_tab_del;
+	 
+	 IF :vsuc1 = '' THEN
+		error := 102;
+		error_message := 'El registro no tiene sucursal asignada';
+	 END IF;
+	
+	 IF :vu_area = '' THEN
+		error := 102;
+		error_message := 'El registro no tiene area asignada';
+	 END IF;
+	
+	 IF :vu_sector = '' THEN
+		error := 102;
+		error_message := 'El registro no tiene sector asignado';
+	 END IF;
+	
+	BEGIN
+		DECLARE CURSOR DETALLE FOR
+		SELECT "ChildNum", IFNULL("OcrCode",''), IFNULL("OcrCode2",''), IFNULL("OcrCode3",'')
+		  FROM "ITT1" 
+		 WHERE "Father" = :list_of_cols_val_tab_del;
+		
+		  OPEN DETALLE;
+		 FETCH DETALLE INTO vlinenum, vsuc, varea, vsector;
+		
+	 WHILE NOT DETALLE::NOTFOUND DO
+			
+			IF :vsuc = '' THEN
+				error := 102;
+				error_message := 'El item (' || vlinenum || ') no tiene sucursal asignada';
+			END IF;
+			
+			IF :varea = '' THEN
+				error := 102;
+				error_message := 'El item (' || vlinenum || ') no tiene area asignada';
+			END IF;
+			
+			IF :vsector = '' THEN
+				error := 102;
+				error_message := 'El item (' || vlinenum || ') no tiene sector asignado';
+			END IF;
+			
+			/*IF :vsuc <> :vsuc1 THEN
+				error := 102;
+				error_message := 'El item (' || vlinenum || ') tiene sucursal asignada en linea distinta a la cabecera';
+			END IF;*/
+
+			/*IF :varea <> :vu_area THEN
+				error := 102;
+				error_message := 'El item (' || vlinenum || ') tiene area asignada en linea distinta a la cabecera';
+			END IF;*/
+
+			/*IF :vsector <> :vu_sector THEN
+				error := 102;
+				error_message := 'El item (' || vlinenum || ') tiene Sector asignada en linea distinta a la cabecera';
+			END IF;*/
+			
+			FETCH DETALLE INTO vlinenum, vsuc, varea, vsector;
+		END WHILE;
+	END;
+END IF;
+--------------------------------------------------------------------------------------------------
+IF (:object_type IN ('13', '14', '18', '19')) AND (:transaction_type in ('C', 'D')) THEN
+
+  SELECT COUNT(*) 
+    INTO vcnt 
+    FROM "@LOC_ORDEN_PAGO_CAB" C,
+         "@LOC_ORDEN_PAGO_DET" D
+   WHERE D."DocEntry" = C."DocEntry"
+     AND D."U_DOCENTRY" = :list_of_cols_val_tab_del 
+     AND C."Canceled" = 'N'
+     AND C."U_ESTADO" <> 'R';
+     
+  IF vcnt > 0  THEN
+    error := 1000;
+	error_message := 'El documento esta incluido en una OP, no es posible cancelarlo';
+  END IF;
+  
+END IF;
 
 
 -- Select the return values
